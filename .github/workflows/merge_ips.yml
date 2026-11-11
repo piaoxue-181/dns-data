@@ -1,0 +1,80 @@
+name: Merge DNS IPs
+
+on:
+  schedule:
+    # 每小时的第 14, 29, 44, 59 分钟运行（注意：GitHub Actions 使用的是 UTC 时间）
+    - cron: '14,29,44,59 * * * *'
+  workflow_dispatch: # 允许手动触发测试
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch JSONs and Merge
+        run: |
+          # 定义基础 URL（根据你的仓库名生成 raw 链接）
+          # 请确保这里的分支名 main 与你实际使用的分支一致
+          BASE_URL="https://raw.githubusercontent.com/piaoxue-181/dns-data/main"
+          
+          # 1. 下载所有源文件 (使用 -s 静默模式，-f 在 404 时直接失败退出)
+          echo "正在下载源 JSON 文件..."
+          curl -sf "$BASE_URL/dns_cf_yidong_ips.json" -o cf_yidong.json || echo "[]" > cf_yidong.json
+          curl -sf "$BASE_URL/dns_cf_liantong_ips.json" -o cf_liantong.json || echo "[]" > cf_liantong.json
+          curl -sf "$BASE_URL/dns_cf_dianxin_ips.json" -o cf_dianxin.json || echo "[]" > cf_dianxin.json
+          
+          curl -sf "$BASE_URL/dns_vercel_yidong_ips.json" -o vercel_yidong.json || echo "[]" > vercel_yidong.json
+          curl -sf "$BASE_URL/dns_vercel_liantong_ips.json" -o vercel_liantong.json || echo "[]" > vercel_liantong.json
+          curl -sf "$BASE_URL/dns_vercel_dianxin_ips.json" -o vercel_dianxin.json || echo "[]" > vercel_dianxin.json
+
+          # 获取当前北京时间（ISO 8601 格式，带 +08:00）
+          UPDATED_AT=$(TZ='Asia/Shanghai' date +%Y-%m-%dT%H:%M:%S+08:00)
+          
+          # 2. 合并 Cloudflare 数据，并构建外层包装结构
+          echo "正在合并 Cloudflare 数据..."
+          jq -n \
+            --arg updatedAt "$UPDATED_AT" \
+            --slurpfile yidong cf_yidong.json \
+            --slurpfile liantong cf_liantong.json \
+            --slurpfile dianxin cf_dianxin.json \
+            '{
+              success: true,
+              data: {
+                updatedAt: $updatedAt,
+                items: ($yidong[0] + $liantong[0] + $dianxin[0])
+              }
+            }' > cf_ips.json
+
+          # 3. 合并 Vercel 数据，并构建外层包装结构
+          echo "正在合并 Vercel 数据..."
+          jq -n \
+            --arg updatedAt "$UPDATED_AT" \
+            --slurpfile yidong vercel_yidong.json \
+            --slurpfile liantong vercel_liantong.json \
+            --slurpfile dianxin vercel_dianxin.json \
+            '{
+              success: true,
+              data: {
+                updatedAt: $updatedAt,
+                items: ($yidong[0] + $liantong[0] + $dianxin[0])
+              }
+            }' > vercel_ips.json
+
+      - name: Commit and Push Changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add cf_ips.json vercel_ips.json
+          # 检查是否有文件变更，如果有则提交
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git commit -m "Auto Merge DNS IPs: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            git push
+          else
+            echo "没有文件变化，跳过提交。"
+          fi
+
+      - name: Cleanup Temp Files
+        run: |
+          rm -f cf_*.json vercel_*.json
