@@ -2,8 +2,8 @@ name: Merge DNS IPs
 
 on:
   schedule:
-    # 每小时的第 14, 29, 44, 59 分钟运行（注意：GitHub Actions 使用的是 UTC 时间）
-    - cron: '14,29,44,59 * * * *'
+    # 每小时的第 15, 30, 45, 00 分钟运行（注意：GitHub Actions 使用的是 UTC 时间）
+    - cron: '15,30,45,0 * * * *'
   workflow_dispatch: # 允许在网页上手动点击测试
 
 jobs:
