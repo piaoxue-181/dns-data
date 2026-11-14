@@ -21,7 +21,6 @@ jobs:
           curl -sf "$BASE_URL/dns_cf_yidong_ips.json" -o cf_yidong.json || echo "[]" > cf_yidong.json
           curl -sf "$BASE_URL/dns_cf_liantong_ips.json" -o cf_liantong.json || echo "[]" > cf_liantong.json
           curl -sf "$BASE_URL/dns_cf_dianxin_ips.json" -o cf_dianxin.json || echo "[]" > cf_dianxin.json
-          curl -sf "$BASE_URL/dns_cf_yidong_ipv6_ips.json" -o cf_yidong_ipv6.json || echo "[]" > cf_yidong_ipv6.json
 
           curl -sf "$BASE_URL/dns_vercel_yidong_ips.json" -o vercel_yidong.json || echo "[]" > vercel_yidong.json
           curl -sf "$BASE_URL/dns_vercel_liantong_ips.json" -o vercel_liantong.json || echo "[]" > vercel_liantong.json
@@ -31,28 +30,23 @@ jobs:
           UPDATED_AT=$(TZ='Asia/Shanghai' date +%Y-%m-%dT%H:%M:%S+08:00)
           echo "本次更新时间: $UPDATED_AT"
 
-          # ---------- Cloudflare：合并 IPv4 三网 + IPv6 ----------
-          echo "正在合并 Cloudflare 数据（含 IPv6）..."
+          # ---------- Cloudflare：合并三网 + 挑选最优10个加入多线 ----------
+          echo "正在合并 Cloudflare 数据（含多线优选）..."
           jq -n \
             --arg updatedAt "$UPDATED_AT" \
             --slurpfile yidong cf_yidong.json \
             --slurpfile liantong cf_liantong.json \
             --slurpfile dianxin cf_dianxin.json \
-            --slurpfile ipv6 cf_yidong_ipv6.json \
             '
-            # 合并所有 CF 条目（IPv4 三网 + IPv6）
-            ($yidong[0] + $liantong[0] + $dianxin[0] + $ipv6[0]) as $all |
+            # 1. 合并所有三网 CF 条目
+            ($yidong[0] + $liantong[0] + $dianxin[0]) as $all |
 
-            # 三网交集：在移动、联通、电信三个文件中都出现的 IP
-            # 先用 unique 去重，再取交集
-            ([ $yidong[0][] | .ip ] | unique) as $cm_ips |
-            ([ $liantong[0][] | .ip ] | unique) as $cu_ips |
-            ([ $dianxin[0][] | .ip ] | unique) as $ct_ips |
-            ($cm_ips - ($cm_ips - $cu_ips) - ($cm_ips - $ct_ips)) as $multi_ips |
-
-            # 从 $all 中挑出多线 IP，生成 ALL 条目，同时去重
-            ([ $all[] | select(.ip as $ip | $multi_ips | index($ip)) ]
-              | unique_by(.ip)
+            # 2. 挑选最优的 10 个 IP 作为多线
+            # 逻辑：先按延迟升序排，如果延迟相同按速度降序排，然后取前 10
+            ([ $all[] | select(.latency > 0 and .loss == 0) ] 
+              | unique_by(.ip) 
+              | sort_by(.latency, -.speed) 
+              | .[:10] 
               | map({
                   ip: .ip,
                   line: "ALL",
@@ -64,9 +58,10 @@ jobs:
                 })
             ) as $multi_items |
 
-            # 原条目全部刷新 checkedAt 为当前时间
+            # 3. 原条目全部刷新 checkedAt 为当前时间
             ($all | map(. + {checkedAt: $updatedAt})) as $refreshed |
 
+            # 4. 合并输出
             {
               success: true,
               data: {
@@ -95,18 +90,22 @@ jobs:
             }
             ' > vercel_ips.json
 
-          echo "合并完成，cf_ips.json 条目数: $(jq '.data.items | length' cf_ips.json)"
+          echo "合并完成，cf_ips.json 条目数: $(jq '.data.items | length' cf_ips.json) (含多线 $(jq '[.data.items[] | select(.line == "ALL")] | length' cf_ips.json) 个)"
           echo "合并完成，vercel_ips.json 条目数: $(jq '.data.items | length' vercel_ips.json)"
 
       - name: Commit and Push Changes
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          
           git add cf_ips.json vercel_ips.json
-
-          # 每 15 分钟无条件提交（updatedAt 和 checkedAt 必然变化）
-          git commit -m "Auto Merge IPs: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S +08:00')"
-          git push
+          git commit -m "Auto Merge IPs: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S +08:00')" || echo "没有文件变化"
+          
+          # 拉取远端最新代码（变基模式），防止你的 Python 脚本刚好也在推送导致冲突
+          git pull --rebase origin main
+          
+          # 再次推送
+          git push origin main
 
       - name: Cleanup Temp Files
         run: |
