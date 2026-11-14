@@ -2,8 +2,8 @@ name: Merge DNS IPs
 
 on:
   schedule:
-    # 每小时的第 15, 30, 45, 00 分钟运行（注意：GitHub Actions 使用的是 UTC 时间）
-    - cron: '15,30,45,0 * * * *'
+    # 每 15 分钟运行一次（UTC 时间，对应北京时间每小时的 00/15/30/45 分）
+    - cron: '0,15,30,45 * * * *'
   workflow_dispatch: # 允许在网页上手动点击测试
 
 jobs:
@@ -15,65 +15,98 @@ jobs:
 
       - name: Fetch JSONs and Merge
         run: |
-          # 基础 URL，请确保分支名 main 与你的实际分支一致
           BASE_URL="https://raw.githubusercontent.com/piaoxue-181/dns-data/main"
-          
-          # 1. 下载所有源文件 (如果遇到 404，则自动创建空数组 [] 兜底)
+
           echo "正在下载源 JSON 文件..."
           curl -sf "$BASE_URL/dns_cf_yidong_ips.json" -o cf_yidong.json || echo "[]" > cf_yidong.json
           curl -sf "$BASE_URL/dns_cf_liantong_ips.json" -o cf_liantong.json || echo "[]" > cf_liantong.json
           curl -sf "$BASE_URL/dns_cf_dianxin_ips.json" -o cf_dianxin.json || echo "[]" > cf_dianxin.json
-          
+          curl -sf "$BASE_URL/dns_cf_yidong_ipv6_ips.json" -o cf_yidong_ipv6.json || echo "[]" > cf_yidong_ipv6.json
+
           curl -sf "$BASE_URL/dns_vercel_yidong_ips.json" -o vercel_yidong.json || echo "[]" > vercel_yidong.json
           curl -sf "$BASE_URL/dns_vercel_liantong_ips.json" -o vercel_liantong.json || echo "[]" > vercel_liantong.json
           curl -sf "$BASE_URL/dns_vercel_dianxin_ips.json" -o vercel_dianxin.json || echo "[]" > vercel_dianxin.json
 
-          # 获取当前北京时间（ISO 8601 格式，带 +08:00）
+          # 当前北京时间
           UPDATED_AT=$(TZ='Asia/Shanghai' date +%Y-%m-%dT%H:%M:%S+08:00)
-          
-          # 2. 合并 Cloudflare 数据，并构建你需要的标准外层包装
-          echo "正在合并 Cloudflare 数据..."
+          echo "本次更新时间: $UPDATED_AT"
+
+          # ---------- Cloudflare：合并 IPv4 三网 + IPv6 ----------
+          echo "正在合并 Cloudflare 数据（含 IPv6）..."
           jq -n \
             --arg updatedAt "$UPDATED_AT" \
             --slurpfile yidong cf_yidong.json \
             --slurpfile liantong cf_liantong.json \
             --slurpfile dianxin cf_dianxin.json \
-            '{
+            --slurpfile ipv6 cf_yidong_ipv6.json \
+            '
+            # 合并所有 CF 条目（IPv4 三网 + IPv6）
+            ($yidong[0] + $liantong[0] + $dianxin[0] + $ipv6[0]) as $all |
+
+            # 三网交集：在移动、联通、电信三个文件中都出现的 IP
+            # 先用 unique 去重，再取交集
+            ([ $yidong[0][] | .ip ] | unique) as $cm_ips |
+            ([ $liantong[0][] | .ip ] | unique) as $cu_ips |
+            ([ $dianxin[0][] | .ip ] | unique) as $ct_ips |
+            ($cm_ips - ($cm_ips - $cu_ips) - ($cm_ips - $ct_ips)) as $multi_ips |
+
+            # 从 $all 中挑出多线 IP，生成 ALL 条目，同时去重
+            ([ $all[] | select(.ip as $ip | $multi_ips | index($ip)) ]
+              | unique_by(.ip)
+              | map({
+                  ip: .ip,
+                  line: "ALL",
+                  name: "多线",
+                  latency: .latency,
+                  speed: .speed,
+                  loss: .loss,
+                  checkedAt: $updatedAt
+                })
+            ) as $multi_items |
+
+            # 原条目全部刷新 checkedAt 为当前时间
+            ($all | map(. + {checkedAt: $updatedAt})) as $refreshed |
+
+            {
               success: true,
               data: {
                 updatedAt: $updatedAt,
-                items: ($yidong[0] + $liantong[0] + $dianxin[0])
+                items: ($refreshed + $multi_items)
               }
-            }' > cf_ips.json
+            }
+            ' > cf_ips.json
 
-          # 3. 合并 Vercel 数据，并构建你需要的标准外层包装
+          # ---------- Vercel：合并三网 ----------
           echo "正在合并 Vercel 数据..."
           jq -n \
             --arg updatedAt "$UPDATED_AT" \
             --slurpfile yidong vercel_yidong.json \
             --slurpfile liantong vercel_liantong.json \
             --slurpfile dianxin vercel_dianxin.json \
-            '{
+            '
+            ( $yidong[0] + $liantong[0] + $dianxin[0]
+              | map(. + {checkedAt: $updatedAt}) ) as $items |
+            {
               success: true,
               data: {
                 updatedAt: $updatedAt,
-                items: ($yidong[0] + $liantong[0] + $dianxin[0])
+                items: $items
               }
-            }' > vercel_ips.json
+            }
+            ' > vercel_ips.json
+
+          echo "合并完成，cf_ips.json 条目数: $(jq '.data.items | length' cf_ips.json)"
+          echo "合并完成，vercel_ips.json 条目数: $(jq '.data.items | length' vercel_ips.json)"
 
       - name: Commit and Push Changes
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add cf_ips.json vercel_ips.json
-          
-          # 检查文件是否发生变化，有变化才提交，避免不必要的报错
-          if ! git diff --quiet || ! git diff --cached --quiet; then
-            git commit -m "Auto Merge IPs: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-            git push
-          else
-            echo "没有文件变化，跳过提交。"
-          fi
+
+          # 每 15 分钟无条件提交（updatedAt 和 checkedAt 必然变化）
+          git commit -m "Auto Merge IPs: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S +08:00')"
+          git push
 
       - name: Cleanup Temp Files
         run: |
