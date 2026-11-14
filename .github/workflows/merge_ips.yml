@@ -1,9 +1,7 @@
 name: Merge DNS IPs
 
 on:
-  schedule:
-    # 每 15 分钟运行一次（UTC 时间，对应北京时间每小时的 00/15/30/45 分）
-    - cron: '0,15,30,45 * * * *'
+  # 定时任务已移除，改由 Cloudflare Worker 触发 workflow_dispatch
   workflow_dispatch: # 允许在网页上手动点击测试
 
 jobs:
